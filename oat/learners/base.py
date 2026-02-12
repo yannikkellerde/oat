@@ -239,7 +239,10 @@ class LearnerBase(abc.ABC, DistributedLauncher):
         #   1. AllGather parameters to rank 0
         #   2. Broadcast parameters from rank 0 to all vllm engines
         logging.info(f"Initializing process group for actors {actors}")
-        backend = "gloo" if self.args.collocate else "nccl"
+        # Always use gloo for learner-to-actor weight sync.
+        # NCCL doesn't work when processes have isolated CUDA_VISIBLE_DEVICES
+        # (each process sees only its own GPU as "GPU 0")
+        backend = "gloo"
         if actors and strategy.is_group_rank_0():
             master_addr = node_ip_address_from_perspective()
             with socket.socket() as sock:
@@ -271,14 +274,24 @@ class LearnerBase(abc.ABC, DistributedLauncher):
             self._same_actor_group = None
             dist.barrier()
             torch.cuda.synchronize()
-            assert (
-                len(actors) * args.num_gpus_per_actor * args.num_groups
-                == strategy.world_size
-            ), "Unequal amount of actor and learners"
+
+            # Support asymmetric actor/learner counts
+            # learners_per_actor tells us how many learners share each actor
+            learners_per_actor = getattr(args, "learners_per_actor", None)
+            if learners_per_actor is None:
+                # Fall back to original behavior: assume equal counts
+                assert (
+                    len(actors) * args.num_gpus_per_actor * args.num_groups
+                    == strategy.world_size
+                ), "Unequal amount of actor and learners. Set args.learners_per_actor for asymmetric setups."
+                learners_per_actor = args.num_gpus_per_actor
+
+            # Group learners that share the same actor together
             same_actor_group_ranks = [
-                list(range(i, i + args.num_gpus_per_actor))
-                for i in range(0, strategy.world_size, args.num_gpus_per_actor)
+                list(range(i, i + learners_per_actor))
+                for i in range(0, strategy.world_size, learners_per_actor)
             ]
+            logging.info(f"Creating same_actor_groups: {same_actor_group_ranks}")
 
             for group_ranks in same_actor_group_ranks:
                 group = dist.new_group(
@@ -352,6 +365,8 @@ class LearnerBase(abc.ABC, DistributedLauncher):
                 desc=f"Prompt epoch [{p_ep + 1}/{self.args.num_prompt_epoch}]",
                 disable=not self.strategy.is_rank_0(),
             )
+
+            print(f"Length of prompts_dataloader: {len(self.prompts_dataloader)}")
 
             for processed_prompts, raw_prompts, refs in self.prompts_dataloader:
                 if early_stop:

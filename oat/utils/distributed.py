@@ -167,7 +167,8 @@ class WorkerWrap:
             # because nccl will report error when two processes are on the same device.
             raise NotImplementedError
         else:
-            # Using nccl when actors and learners are on difference devices.
+            # Using gloo backend for weight sync (works across isolated CUDA_VISIBLE_DEVICES).
+            # Gloo handles CUDA tensors by copying to/from CPU internally.
             weight = torch.empty(shape, dtype=dtype, device="cuda")
             torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             self.model_runner.model.load_weights(weights=[(name, weight)])
