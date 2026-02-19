@@ -28,7 +28,6 @@ dependencies = [
   "deepspeed==0.16.8",
   "dm-launchpad[tensorflow]",
   "einops",
-  "flash-attn==2.7.4.post1",
   "fire",
   "httpx",
   "jsonlines",
